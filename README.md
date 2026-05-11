@@ -28,6 +28,7 @@ cstatus         # verify auth
 
 ```
 Auth
+  copen <PAGE_ID>                           Open page in browser
   cstatus                                   Show auth status
   clogin [site]                             Login via browser
   clogout                                   Logout current session
@@ -41,11 +42,13 @@ Pages
   cpage <PAGE_ID> [flags...]                View one page as JSON
   ccontext <PAGE_ID> [flags...]             Page with children, labels, props, version
   cpagebody <PAGE_ID> [flags...]            Print only the page body
+  cread <PAGE_ID>                           Print page as readable markdown in terminal
 
 Blogs
   cblogs <SPACE_ID|KEY> [flags...]          List blog posts in a space
   cblog <BLOG_ID> [flags...]                View one blog post as JSON
   cblogbody <BLOG_ID> [flags...]            Print only the blog body
+  cblogread <BLOG_ID>                       Print blog post as readable markdown in terminal
 
 Pass-through
   confluence <args...>                      Raw acli confluence pass-through
