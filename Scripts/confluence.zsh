@@ -294,6 +294,138 @@ cblogbody() {
   '
 }
 
+_confluence_xml_to_md() {
+  local tmpxml
+  tmpxml="$(mktemp /tmp/cfxml.XXXXXX)"
+  cat > "$tmpxml"
+  python3 - "$tmpxml" <<'PYEOF'
+import sys, re
+
+def convert(xml):
+    code_blocks = []
+    def save_code(m):
+        code_blocks.append(m.group(1))
+        return f'__CODE_{len(code_blocks)-1}__'
+
+    xml = re.sub(r'<ac:plain-text-body[^>]*><!\[CDATA\[(.*?)\]\]></ac:plain-text-body>', save_code, xml, flags=re.DOTALL)
+
+    # drop visual-only macros entirely (diagrams, ToC, etc.)
+    for macro in ('drawio', 'toc', 'macro-pack', 'recently-updated', 'widget'):
+        xml = re.sub(rf'<ac:structured-macro[^>]*ac:name="{macro}"[^>]*>.*?</ac:structured-macro>', '', xml, flags=re.DOTALL)
+
+    # drop ac:parameter tags and their content (macro config noise)
+    xml = re.sub(r'<ac:parameter[^>]*>.*?</ac:parameter>', '', xml, flags=re.DOTALL)
+
+    # keep ac:rich-text-body content, drop the wrapper tags
+    xml = re.sub(r'<ac:rich-text-body[^>]*>', '', xml)
+    xml = re.sub(r'</ac:rich-text-body>', '', xml)
+
+    # drop remaining ac:/ri: tags
+    xml = re.sub(r'</?ac:[^>]+>', '', xml)
+    xml = re.sub(r'<ri:[^>]+/?>', '', xml)
+
+    for i in range(1, 7):
+        xml = re.sub(rf'<h{i}[^>]*>(.*?)</h{i}>', lambda m, n=i: '\n' + '#'*n + ' ' + re.sub('<[^>]+>', '', m.group(1)).strip() + '\n', xml, flags=re.DOTALL)
+
+    xml = re.sub(r'<strong[^>]*>(.*?)</strong>', r'**\1**', xml, flags=re.DOTALL)
+    xml = re.sub(r'<em[^>]*>(.*?)</em>', r'_\1_', xml, flags=re.DOTALL)
+    xml = re.sub(r'<code[^>]*>(.*?)</code>', r'`\1`', xml, flags=re.DOTALL)
+    xml = re.sub(r'<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', r'[\2](\1)', xml, flags=re.DOTALL)
+
+    def fmt_table(m):
+        rows = re.findall(r'<tr[^>]*>(.*?)</tr>', m.group(0), re.DOTALL)
+        out = []
+        for i, row in enumerate(rows):
+            cells = re.findall(r'<t[hd][^>]*>(.*?)</t[hd]>', row, re.DOTALL)
+            line = '| ' + ' | '.join(re.sub('<[^>]+>', '', c).strip() for c in cells) + ' |'
+            out.append(line)
+            if i == 0:
+                out.append('| ' + ' | '.join('---' for _ in cells) + ' |')
+        return '\n' + '\n'.join(out) + '\n'
+    xml = re.sub(r'<table[^>]*>.*?</table>', fmt_table, xml, flags=re.DOTALL)
+
+    def fmt_list(m, ordered=False):
+        items = re.findall(r'<li[^>]*>(.*?)</li>', m.group(0), re.DOTALL)
+        lines = []
+        for idx, item in enumerate(items):
+            text = re.sub('<[^>]+>', '', item).strip()
+            prefix = f'{idx+1}.' if ordered else '-'
+            lines.append(f'{prefix} {text}')
+        return '\n' + '\n'.join(lines) + '\n'
+    xml = re.sub(r'<ol[^>]*>(.*?)</ol>', lambda m: fmt_list(m, ordered=True), xml, flags=re.DOTALL)
+    xml = re.sub(r'<ul[^>]*>(.*?)</ul>', fmt_list, xml, flags=re.DOTALL)
+
+    xml = re.sub(r'<p[^>]*>(.*?)</p>', lambda m: '\n' + re.sub('<[^>]+>', '', m.group(1)).strip() + '\n', xml, flags=re.DOTALL)
+    xml = re.sub(r'<[^>]+>', '', xml)
+
+    for i, code in enumerate(code_blocks):
+        xml = xml.replace(f'__CODE_{i}__', '\n```\n' + code.strip() + '\n```\n')
+
+    xml = xml.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&nbsp;', ' ')
+    xml = xml.replace('&#39;', "'").replace('&quot;', '"').replace('&zwj;', '').replace('&bull;', '•')
+    xml = re.sub(r'&[a-zA-Z]+;', '', xml)  # strip any remaining named entities
+    xml = re.sub(r'\n{3,}', '\n\n', xml)
+    return xml.strip()
+
+data = open(sys.argv[1]).read()
+print(convert(data))
+PYEOF
+  rm -f "$tmpxml"
+}
+
+cread() {
+  _confluence_require_acli || return 1
+  _confluence_require_jq || return 1
+
+  local page_id="$1"
+  if [[ -z "$page_id" ]]; then
+    echo 'Usage: cread <page-id>' >&2
+    return 1
+  fi
+
+  local title body
+  local json
+  json="$(acli confluence page view --id "$page_id" --body-format storage --json 2>/dev/null)"
+  title="$(print -r -- "$json" | jq -r '.title // empty')"
+  body="$(print -r -- "$json" | jq -r '
+    [.body.storage.value?, .body.view.value?, .body.value?, .value?]
+    | map(select(type == "string" and length > 0))
+    | .[0] // empty
+  ')"
+
+  if [[ -n "$title" ]]; then
+    printf '# %s\n\n' "$title"
+  fi
+
+  print -r -- "$body" | _confluence_xml_to_md
+}
+
+cblogread() {
+  _confluence_require_acli || return 1
+  _confluence_require_jq || return 1
+
+  local blog_id="$1"
+  if [[ -z "$blog_id" ]]; then
+    echo 'Usage: cblogread <blog-id>' >&2
+    return 1
+  fi
+
+  local json title body
+  json="$(acli confluence blog view --id "$blog_id" --body-format storage --json 2>/dev/null)"
+  title="$(print -r -- "$json" | jq -r '.title // empty')"
+  body="$(print -r -- "$json" | jq -r '
+    [.body.storage.value?, .body.view.value?, .body.value?, .value?]
+    | map(select(type == "string" and length > 0))
+    | .[0] // empty
+  ')"
+
+  if [[ -n "$title" ]]; then
+    printf '# %s\n\n' "$title"
+  fi
+
+  print -r -- "$body" | _confluence_xml_to_md
+}
+
 _chelp_heading()  { printf '\n%s\n' "$1"; }
 _chelp_meta()     { printf '  %-8s %s\n' "$1" "$2"; }
 _chelp_cmd()      { printf '  %-52s %s\n' "$1" "$2"; }
@@ -319,11 +451,13 @@ chelp() {
   _chelp_cmd "cpage [PAGE_ID] [page view flags...]" "View one page as JSON"
   _chelp_cmd_wrap "ccontext [PAGE_ID] [page view flags...]" "View one page with children, labels, properties, and version"
   _chelp_cmd "cpagebody [PAGE_ID] [page view flags...]" "Print only the resolved page body"
+  _chelp_cmd "cread [PAGE_ID]" "Print page as readable markdown in terminal"
 
   _chelp_heading "Blogs"
   _chelp_cmd "cblogs [SPACE_ID|SPACE_KEY] [blog list flags...]" "List blog posts in a space as JSON"
   _chelp_cmd "cblog [BLOG_ID] [blog view flags...]" "View one blog post as JSON"
   _chelp_cmd "cblogbody [BLOG_ID] [blog view flags...]" "Print only the resolved blog body"
+  _chelp_cmd "cblogread [BLOG_ID]" "Print blog post as readable markdown in terminal"
 
   _chelp_heading "Raw pass-through"
   _chelp_cmd "confluence <acli confluence args...>" "Pass through to acli confluence"
