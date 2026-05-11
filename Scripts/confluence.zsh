@@ -92,6 +92,27 @@ confluence() {
   acli confluence "$@"
 }
 
+copen() {
+  local page_id="$1"
+
+  if [[ -z "$page_id" ]]; then
+    echo 'Usage: copen <page-id>' >&2
+    return 1
+  fi
+
+  local site="${CONFLUENCE_SITE:-}"
+  if [[ -z "$site" ]]; then
+    site="$(acli confluence auth status 2>/dev/null | grep -oE '[a-zA-Z0-9-]+\.atlassian\.net')"
+  fi
+
+  if [[ -z "$site" ]]; then
+    echo "Could not determine Confluence site. Set CONFLUENCE_SITE or run clogin first." >&2
+    return 1
+  fi
+
+  open "https://${site}/wiki/pages/viewpage.action?pageId=${page_id}"
+}
+
 cstatus() {
   _confluence_require_acli || return 1
   acli confluence auth status
@@ -438,6 +459,7 @@ chelp() {
   _chelp_meta "Output:" "JSON by default for AI-agent reads"
 
   _chelp_heading "Auth"
+  _chelp_cmd "copen [PAGE_ID]" "Open page in browser"
   _chelp_cmd "cstatus" "Show Confluence auth status"
   _chelp_cmd "clogin [site]" "Login in browser; falls back to CONFLUENCE_SITE"
   _chelp_cmd "clogout" "Logout current Confluence session"
